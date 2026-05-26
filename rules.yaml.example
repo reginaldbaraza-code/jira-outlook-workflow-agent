@@ -1,0 +1,89 @@
+# Example workflow rules for threat model service automation
+# Copy to rules.yaml and customize
+
+rules:
+  # Auto-create calendar invite when a TM request is scheduled
+  - name: schedule_tm_session
+    description: Create a calendar invite when a TM ticket moves to Scheduled
+    priority: 10
+    trigger:
+      event: issue_updated
+      project: TM
+      field_changed: status
+      new_value: Scheduled
+    conditions:
+      - field: priority
+        operator: in
+        value: [Critical, High, Medium]
+      - field: assignee
+        operator: exists
+    actions:
+      - type: create_calendar_event
+        params:
+          title: "Threat Model: {issue.summary}"
+          duration_minutes: 90
+          attendees:
+            - "{issue.assignee.email}"
+            - "{issue.reporter.email}"
+          body: |
+            Threat Model Session for {issue.key}
+            Service: {issue.summary}
+            Priority: {issue.priority}
+
+            Agenda:
+            1. System Overview & Architecture (20 min)
+            2. STRIDE Analysis (40 min)
+            3. Risk Assessment (15 min)
+            4. Mitigations & Action Items (15 min)
+      - type: add_jira_comment
+        params:
+          text: "📅 Calendar invite sent to {issue.assignee} and {issue.reporter}"
+
+  # Notify on critical findings
+  - name: critical_finding_alert
+    description: Send urgent email when a critical finding is identified
+    priority: 5
+    trigger:
+      event: issue_created
+      project: TM
+    conditions:
+      - field: priority
+        operator: eq
+        value: Critical
+      - field: labels
+        operator: contains
+        value: finding
+    actions:
+      - type: send_email
+        params:
+          to:
+            - security-lead@company.com
+          subject: "🔴 Critical TM Finding: {issue.summary}"
+          body: |
+            A critical threat model finding has been identified.
+
+            Issue: {issue.key}
+            Summary: {issue.summary}
+            Reporter: {issue.reporter}
+
+            Please review and assign immediately.
+
+  # Escalate ambiguous requests to LLM
+  - name: escalate_unclear_priority
+    description: Use LLM to determine priority for ambiguous requests
+    priority: 50
+    trigger:
+      event: issue_created
+      project: TM
+    conditions:
+      - field: priority
+        operator: eq
+        value: Medium
+      - field: description
+        operator: contains
+        value: "unclear"
+    actions:
+      - type: escalate_to_llm
+        params:
+          context: "New TM request with unclear scope"
+          question: "Based on the description, what priority should this be?"
