@@ -1,70 +1,37 @@
 # Jira-Outlook Workflow Agent 🔄
 
-A rule engine that bridges Jira webhooks to Outlook calendar actions, with LLM reasoning for edge cases. Automates the tedious glue work between ticket management and calendar scheduling.
+A rule engine that listens for Jira webhook events and automatically performs Outlook calendar/email actions. Define rules in YAML (trigger → conditions → actions), and the engine handles the rest. For ambiguous situations, it escalates to an LLM for a decision.
 
-## Problem
+## The Problem
 
-Security teams running threat modeling services constantly context-switch between Jira and Outlook:
-- New high-priority ticket → manually create a calendar invite
-- Ticket rescheduled → manually update the meeting
-- Assessment completed → manually send follow-up emails
-- SLA approaching → manually check calendar for availability
+If you run a threat modeling service, you spend a surprising amount of time on the glue between tools:
 
-This agent automates those workflows with a declarative rule engine and an LLM fallback for ambiguous situations.
+- High-priority ticket lands → you manually create a 90-minute calendar invite with the right people
+- Ticket gets rescheduled → you manually update the meeting
+- Assessment is completed → you manually send a follow-up email to the team
+- An SLA is about to breach → you manually check calendars for an urgent slot
 
-## Architecture
+This project replaces that manual glue with declarative rules.
+
+## How It Works
 
 ```
-┌──────────────┐     ┌────────────────┐     ┌──────────────────┐
-│  Jira        │────▶│  Rule Engine   │────▶│  Outlook         │
-│  Webhooks    │     │                │     │  Calendar/Email   │
-└──────────────┘     │  ┌──────────┐  │     └──────────────────┘
-                     │  │ LLM      │  │
-                     │  │ Fallback │  │     ┌──────────────────┐
-                     │  └──────────┘  │────▶│  Audit Log       │
-                     └────────────────┘     └──────────────────┘
+Jira Webhooks ──▶ Rule Engine ──▶ Outlook Calendar / Email
+                      │
+                  LLM Fallback ──▶ Audit Log
 ```
 
-## Features
+1. Jira fires a webhook when a ticket changes (created, updated, status transition)
+2. The webhook parser extracts the event into a structured `JiraEvent` object
+3. The rule engine evaluates every active rule against the event
+4. For each matching rule, it executes the actions (create meeting, send email, add comment)
+5. Everything is logged in the audit trail for compliance
 
-### Rule Engine (`src/rules/`)
-- **Declarative rules** — Define trigger→condition→action rules in YAML
-- **Event matching** — Match Jira webhook events by type, project, status, priority
-- **Condition evaluation** — Combine conditions with AND/OR/NOT logic
-- **Action execution** — Create/update/cancel calendar events, send emails
-- **Dry-run mode** — Preview actions without executing them
-
-### Connectors (`src/connectors/`)
-- **Jira connector** — Parse webhook payloads, extract event metadata
-- **Outlook connector** — Calendar CRUD via Microsoft Graph API
-- **Audit logger** — Record every action for compliance
-
-### LLM Agent (`src/agent/`)
-- **Edge case handler** — Route ambiguous events to LLM for decision
-- **Conflict resolver** — Handle scheduling conflicts intelligently
-- **Natural language rules** — Convert plain English rules to engine format
-
-## Quick Start
-
-```bash
-git clone https://github.com/reginaldbaraza-code/jira-outlook-workflow-agent.git
-cd jira-outlook-workflow-agent
-pip install -e ".[dev]"
-
-# Configure
-cp .env.example .env
-# Edit .env with your credentials
-
-# Run webhook listener
-uvicorn src.server:app --port 8080
-
-# Or run in dry-run mode
-python -m src.engine --dry-run --rules rules.yaml
-```
+For edge cases (scheduling conflicts, ambiguous priority), a rule can escalate to the LLM agent, which reasons about the situation and suggests the best course of action.
 
 ## Rule Definition
 
-Rules are defined in YAML with a trigger→condition→action pattern:
+Rules live in a YAML file. Each rule has a trigger (what event to watch for), conditions (what to check), and actions (what to do):
 
 ```yaml
 rules:
@@ -75,14 +42,12 @@ rules:
       project: TM
       field_changed: status
       new_value: Scheduled
-
     conditions:
       - field: priority
         operator: in
         value: [Critical, High]
       - field: assignee
         operator: exists
-
     actions:
       - type: create_calendar_event
         params:
@@ -91,11 +56,36 @@ rules:
           attendees:
             - "{issue.assignee.email}"
             - "{issue.reporter.email}"
-          body: "TM session for {issue.key}: {issue.summary}"
-
       - type: add_jira_comment
         params:
-          text: "📅 Calendar invite sent to {issue.assignee.displayName}"
+          text: "📅 Calendar invite sent to {issue.assignee}"
+```
+
+Template variables (`{issue.key}`, `{issue.summary}`, `{issue.assignee.email}`) are resolved from the Jira event at runtime.
+
+## Supported Condition Operators
+
+`eq`, `neq`, `in`, `not_in`, `exists`, `not_exists`, `contains`, `gt`, `lt`, `matches` (regex)
+
+## Supported Action Types
+
+`create_calendar_event`, `update_calendar_event`, `cancel_calendar_event`, `send_email`, `add_jira_comment`, `update_jira_field`, `escalate_to_llm`
+
+## Quick Start
+
+```bash
+git clone https://github.com/reginaldbaraza-code/jira-outlook-workflow-agent.git
+cd jira-outlook-workflow-agent
+pip install -e ".[dev]"
+
+# Run all 28 tests
+pytest -v
+
+# Start the webhook listener
+uvicorn src.server:app --port 8080
+
+# See example rules
+cat rules.yaml.example
 ```
 
 ## Project Structure
@@ -104,31 +94,25 @@ rules:
 jira-outlook-workflow-agent/
 ├── src/
 │   ├── rules/
-│   │   ├── engine.py       # Rule evaluation engine
-│   │   ├── models.py       # Rule, Condition, Action dataclasses
-│   │   ├── parser.py       # YAML rule parser
-│   │   └── templates.py    # Template variable resolution
+│   │   ├── models.py          # Rule, Trigger, Condition, Action, JiraEvent dataclasses
+│   │   ├── engine.py          # Rule evaluation + action dispatch + dry-run mode
+│   │   └── parser.py          # YAML rule file parser
 │   ├── connectors/
-│   │   ├── jira_webhook.py # Jira webhook parser
-│   │   ├── outlook.py      # MS Graph calendar/email client
-│   │   └── audit.py        # Action audit logger
+│   │   ├── jira_webhook.py    # Parses Jira webhook payloads into JiraEvent objects
+│   │   ├── outlook.py         # Outlook calendar/email via MS Graph API interface
+│   │   └── audit.py           # Action audit logger with success rate tracking
 │   ├── agent/
-│   │   ├── reasoning.py    # LLM edge-case reasoning
-│   │   └── prompts.py      # Prompt templates
-│   └── server.py           # FastAPI webhook listener
+│   │   └── reasoning.py       # LLM reasoning for edge cases (Anthropic API)
+│   └── server.py              # FastAPI webhook listener at /webhook/jira
 ├── tests/
-├── rules.yaml.example
+│   └── test_rules_engine.py   # 28 tests covering all modules
+├── rules.yaml.example         # 3 example rules (schedule, alert, LLM escalation)
 └── pyproject.toml
 ```
 
 ## Tech Stack
 
-- **Python 3.11+** — Core language
-- **FastAPI** — Webhook listener
-- **httpx** — Async HTTP client
-- **PyYAML** — Rule definition parsing
-- **Anthropic SDK** — LLM reasoning fallback
-- **pytest** — Testing
+- **Python 3.11+**, **FastAPI**, **PyYAML**, **httpx**, **Anthropic SDK**, **pytest** (28 tests)
 
 ## License
 
